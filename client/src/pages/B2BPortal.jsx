@@ -28,6 +28,7 @@ const QUICK_REPLIES = [
 function NotificationBell({ notifications }) {
   const [open, setOpen] = useState(false);
   const { items, unreadCount, markAllRead, clear } = notifications;
+  const [expandedId, setExpandedId] = useState(null);
 
   return (
     <div style={{ position: 'relative' }}>
@@ -55,13 +56,21 @@ function NotificationBell({ notifications }) {
           </div>
           {items.length === 0 ? (
             <div style={{ padding: '28px 14px', textAlign: 'center', color: '#CBD5E1', fontSize: 12 }}>No notifications yet</div>
-          ) : items.map(n => (
-            <div key={n.id} style={{ padding: '10px 14px', borderBottom: '1px solid #F8FAFC' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{n.title}</div>
-              <div style={{ fontSize: 11, color: '#64748B', marginTop: 2, lineHeight: 1.5 }}>{n.body}</div>
-              <div style={{ fontSize: 10, color: '#CBD5E1', marginTop: 4 }}>{new Date(n.time).toLocaleTimeString('en-IN')}</div>
-            </div>
-          ))}
+          ) : items.map(n => {
+            const isLong = n.body && n.body.length > 140;
+            const isExpanded = expandedId === n.id;
+            return (
+              <div key={n.id} onClick={() => isLong && setExpandedId(isExpanded ? null : n.id)}
+                style={{ padding: '10px 14px', borderBottom: '1px solid #F8FAFC', cursor: isLong ? 'pointer' : 'default' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{n.title}</div>
+                <div style={{ fontSize: 11, color: '#64748B', marginTop: 2, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                  {isExpanded || !isLong ? n.body : `${n.body.slice(0, 140)}…`}
+                </div>
+                {isLong && <div style={{ fontSize: 10, color: '#2561E8', fontWeight: 600, marginTop: 4 }}>{isExpanded ? 'Show less' : 'Show more'}</div>}
+                <div style={{ fontSize: 10, color: '#CBD5E1', marginTop: 4 }}>{new Date(n.time).toLocaleTimeString('en-IN')}</div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -192,7 +201,7 @@ export default function B2BPortal() {
     if (type === 'invoice_reminder_sent') {
       notifications.push({
         title: `📧 Reminder — ${data.invoiceNumber}`,
-        body: data.message?.slice(0, 140) || 'A new reminder was sent.',
+        body: data.message || 'A new reminder was sent.',
         dedupeKey: `reminder_${data.invoiceId}_${data.message?.length}`,
       });
       fetchInvoices();

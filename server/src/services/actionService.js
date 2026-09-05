@@ -163,28 +163,38 @@ async function executeInAppPrompt(transaction, recoveryEvent) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 🧠 Level 4/5: AI conversation / voice escalation
+// A real outbound call can't be faked with a coin flip — this stays 'pending' and
+// genuinely resolves only when the customer completes the actual voice call (real
+// speech-to-text/text-to-speech in the browser, real Groq dialogue) and pays, via
+// the same payment.succeeded handler every other real action uses.
 // ─────────────────────────────────────────────────────────────────────────────
 async function executeEscalation(transaction, customer, recoveryEvent, level) {
   const actionType = level === 5 ? 'voice_escalation' : 'ai_conversation';
-  const success = simulateSuccess(actionType);
+  let openingMessage;
+
+  if (level === 5) {
+    const daysOverdue = transaction.dueDate
+      ? Math.max(0, Math.ceil((Date.now() - new Date(transaction.dueDate)) / 86400000))
+      : 0;
+    const turn = await aiService.generateVoiceTurn({
+      amount: transaction.amount, daysOverdue,
+      conversationHistory: [], lastMessage: '(the call has just connected)'
+    });
+    openingMessage = turn.message;
+  } else {
+    openingMessage = `AI-personalized conversation started for ₹${transaction.amount} recovery — the customer can reply from their own Store chat.`;
+  }
 
   await RecoveryEvent.findByIdAndUpdate(recoveryEvent._id, {
     'actionTaken.type': actionType,
     'actionTaken.channel': level === 5 ? 'voice' : 'whatsapp',
     'actionTaken.method': 'llm',
-    'actionTaken.messageContent': level === 5
-      ? `Hinglish voice agent initiated for ₹${transaction.amount} overdue payment`
-      : `AI-personalized conversation started for ₹${transaction.amount} recovery`,
-    outcome: success ? 'recovered' : 'escalated',
-    amountRecovered: success ? transaction.amount : 0
+    'actionTaken.messageContent': openingMessage,
+    outcome: 'pending',
+    amountRecovered: 0
   });
 
-  await Transaction.findByIdAndUpdate(transaction._id, {
-    status: success ? 'recovered' : 'failed',
-    $inc: { retryCount: 1 }
-  });
-
-  return { success, method: actionType };
+  return { success: false, method: actionType };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

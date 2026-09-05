@@ -4,84 +4,6 @@ import { useSocket } from '../hooks/useSocket';
 
 // ─── Scenario definitions with full recovery metadata ──────────────────────
 const RECOVERY_SCENARIOS = [
-  // ── CUSTOMER-ACTION NEEDED ────────────────────────────────────────────────
-  {
-    id: 'CARD_DECLINED_CUSTOMER',
-    label: 'Card Declined → Customer Notified',
-    category: '👤 Customer Action Needed',
-    icon: '💳',
-    badge: 'L2',
-    badgeColor: '#2561E8',
-    requiresCustomer: true,
-    customerAction: 'payment_link',
-    channel: 'whatsapp',
-    failMsg: 'Your card was declined by the issuing bank.',
-    errorCode: 'CARD_DECLINED',
-    amount: 2999, productName: 'Razorpay Pro Plan',
-    tcpLayer: 'Application Layer',
-    whatsappMsg: 'Hi {name}! 👋\nYour ₹{amount} payment for {product} didn\'t go through (bank declined).\n\nTry a different card or UPI:\n🔗 {link}\n\nNeed help? Reply here.',
-    recovery: { level: 'L2', channel: 'whatsapp', label: 'WhatsApp Nudge — Payment Link' },
-    adminSteps: ['Failure: bank hard decline received', 'Rule: CARD_DECLINED → L2 WhatsApp nudge', 'WhatsApp message dispatched to customer', 'Waiting for customer to complete payment…', 'Customer paid via alternate method ✓'],
-  },
-  {
-    id: 'CARD_EXPIRED_CUSTOMER',
-    label: 'Expired Card → Update Card Details',
-    category: '👤 Customer Action Needed',
-    icon: '📅',
-    badge: 'L2',
-    badgeColor: '#2561E8',
-    requiresCustomer: true,
-    customerAction: 'card_update',
-    channel: 'email',
-    failMsg: 'Your card has expired. Update your payment details to complete the transaction.',
-    errorCode: 'CARD_EXPIRED',
-    amount: 499, productName: 'Cloud Storage 100 GB',
-    tcpLayer: 'Application Layer',
-    emailSubject: 'Action needed — update your card for Cloud Storage 100 GB',
-    emailBody: 'Hi {name},\n\nYour card ending ****{last4} has expired, and your\n₹499 payment for Cloud Storage 100 GB didn\'t go through.\n\nUpdate your card in 30 seconds:',
-    recovery: { level: 'L2', channel: 'email', label: 'Email — Card Update Link' },
-    adminSteps: ['Failure: card expiry validation failed', 'Rule: CARD_EXPIRED → L2 email with update link', 'Recovery email dispatched', 'Waiting for customer to update card…', 'Card updated — payment retried and collected ✓'],
-  },
-  {
-    id: 'OTP_TIMEOUT_CUSTOMER',
-    label: 'OTP Timed Out → Fresh Link',
-    category: '👤 Customer Action Needed',
-    icon: '⏱️',
-    badge: 'L2',
-    badgeColor: '#2561E8',
-    requiresCustomer: true,
-    customerAction: 'payment_link',
-    channel: 'whatsapp',
-    failMsg: 'Authentication timed out — OTP window expired.',
-    errorCode: 'OTP_TIMEOUT',
-    amount: 12000, productName: 'API Access — Annual',
-    tcpLayer: 'Application Layer',
-    whatsappMsg: 'Hi {name}! ⚡\nYour OTP window expired — happens to everyone!\n\nHere\'s a fresh payment link:\n🔗 {link}\n\n✅ Valid for 15 minutes.',
-    recovery: { level: 'L2', channel: 'whatsapp', label: 'WhatsApp — Fresh Payment Link' },
-    adminSteps: ['3DS OTP session expired (5-min TTL)', 'Rule: OTP_TIMEOUT → L2 WhatsApp fresh link', 'New payment link generated (15-min TTL)', 'WhatsApp dispatched to customer', 'Customer clicked link — payment completed ✓'],
-  },
-  {
-    id: 'FRAUD_VERIFY',
-    label: 'Fraud False-Positive → Customer Verify',
-    category: '👤 Customer Action Needed',
-    icon: '🛡️',
-    badge: 'L3',
-    badgeColor: '#C08B00',
-    requiresCustomer: true,
-    customerAction: 'verify',
-    channel: 'email',
-    failMsg: 'Transaction blocked by fraud detection. Possible false positive.',
-    errorCode: 'FRAUD_DETECTED',
-    amount: 7500, productName: 'Team Seats (5 users)',
-    tcpLayer: 'Application Layer',
-    llmDiagnosis: 'Risk score 87/100 triggered block. However: customer has 6 prior successful transactions, device fingerprint matches last 3 sessions, and amount is within historical range. High likelihood of false positive (73%). Recommend: request customer identity verification before retry. Do not hard-block.',
-    llmAction: 'REQUEST_VERIFICATION',
-    emailSubject: 'Security check required — verify it\'s you',
-    emailBody: 'Hi {name},\n\nOur security system flagged your ₹7,500 payment as unusual activity — this may be a false alert.\n\nTo verify it\'s you and complete the payment, click below:',
-    recovery: { level: 'L3', channel: 'email', label: 'Email — Identity Verification' },
-    adminSteps: ['Fraud Shield: HIGH_RISK (87/100)', 'LLM: Likely false positive — 6 prior txns match profile', 'LLM: Recommend verification instead of hard block', 'Verification email sent to customer', 'Customer verified — payment unblocked and collected ✓'],
-  },
-
   // ── CONVERSATION-BASED (LLM dialogue) ─────────────────────────────────────
   {
     id: 'CUSTOMER_ASKS_WHY',
@@ -146,7 +68,15 @@ const RECOVERY_SCENARIOS = [
   },
 ];
 
-const CATEGORY_ORDER = ['👤 Customer Action Needed', '💬 LLM Conversation'];
+const CATEGORY_ORDER = ['💬 LLM Conversation'];
+
+const FAILURE_ICONS = {
+  CARD_DECLINED: '💳', CARD_EXPIRED: '📅', CARD_STOLEN: '💳', CARD_BLOCKED: '💳',
+  OTP_TIMEOUT: '⏱️', THREE_D_SECURE_FAILED: '⏱️', AUTH_REQUIRED: '⏱️',
+  FRAUD_DETECTED: '🛡️', FRAUD_BLOCK: '🛡️', SUSPECTED_FRAUD: '🛡️',
+  INSUFFICIENT_FUNDS: '💰', GATEWAY_TIMEOUT: '🌐', NETWORK_ERROR: '🌐',
+  ABANDONED: '🛒',
+};
 
 // ─── Utilities ──────────────────────────────────────────────────────────────
 const randSlug = () => Math.random().toString(36).slice(2, 8);
@@ -450,10 +380,10 @@ function RecoveryDualPanelLive({ scenario, customer, onReset }) {
     recoveryEventIdRef.current = null;
 
     const inferredCategory = /plan|seats/i.test(scenario.productName || '') ? 'subscription' : 'checkout';
-    axios.post('/api/recovery-live/trigger', {
-      customerId: customer._id, errorCode: scenario.errorCode, errorReason: scenario.failMsg,
-      amount: scenario.amount, category: inferredCategory
-    }).then(res => setTransactionId(res.data.transactionId)).catch(() => {});
+    axios.post('/api/recovery-live/trigger', scenario.transactionId
+      ? { transactionId: scenario.transactionId }
+      : { customerId: customer._id, errorCode: scenario.errorCode, errorReason: scenario.failMsg, amount: scenario.amount, category: inferredCategory }
+    ).then(res => setTransactionId(res.data.transactionId)).catch(() => {});
   }, [scenario.id, customer?._id]);
 
   useSocket((type, data) => {
@@ -480,13 +410,18 @@ function RecoveryDualPanelLive({ scenario, customer, onReset }) {
   const recovered = outcome === 'recovered';
   const escalated = outcome === 'escalated';
   const isVerificationGate = action?.type === 'in_app_prompt';
+  const isMandateFlow = action?.type?.startsWith('mandate') || false;
   const lastStepLabel = recovered
     ? `Recovered ✓ · ₹${Number(amountRecovered).toLocaleString('en-IN')}`
     : escalated
-      ? '❌ Customer said "not me" — escalated to fraud review, blocked'
-      : isVerificationGate && !identityConfirmed
-        ? 'Awaiting customer to verify their identity…'
-        : 'Awaiting customer to complete payment…';
+      ? isMandateFlow
+        ? '❌ Mandate retry limit reached — escalated to human/dunning follow-up'
+        : '❌ Customer said "not me" — escalated to fraud review, blocked'
+      : isMandateFlow
+        ? 'Awaiting next auto-debit retry window…'
+        : isVerificationGate && !identityConfirmed
+          ? 'Awaiting customer to verify their identity…'
+          : 'Awaiting customer to complete payment…';
   const steps = [
     'Failure event received',
     diagnosis ? `Diagnosed: ${diagnosis.bucket} (${diagnosis.method === 'llm' ? 'LLM diagnosis' : 'rule'})` : 'Diagnosing…',
@@ -514,7 +449,7 @@ function RecoveryDualPanelLive({ scenario, customer, onReset }) {
         </div>
         <span style={{ fontSize: 11, fontWeight: 700, color: BADGE_COLORS[scenario.badge], background: `${BADGE_COLORS[scenario.badge]}18`, border: `1px solid ${BADGE_COLORS[scenario.badge]}30`, padding: '3px 8px', borderRadius: 4 }}>{scenario.badge}</span>
         {recovered && <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--green)', background: 'var(--green-bg)', border: '1px solid rgba(14,163,113,0.25)', padding: '4px 10px', borderRadius: 5 }}>✅ RECOVERED · ₹{Number(amountRecovered).toLocaleString('en-IN')}</span>}
-        {escalated && <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)', background: 'var(--red-bg)', border: '1px solid rgba(229,72,77,0.25)', padding: '4px 10px', borderRadius: 5 }}>🛑 BLOCKED — FRAUD REVIEW</span>}
+        {escalated && <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)', background: 'var(--red-bg)', border: '1px solid rgba(229,72,77,0.25)', padding: '4px 10px', borderRadius: 5 }}>{isMandateFlow ? '🛑 MANDATE RETRIES EXHAUSTED' : '🛑 BLOCKED — FRAUD REVIEW'}</span>}
         <button onClick={onReset} style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 6, padding: '6px 12px', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>← Change scenario</button>
       </div>
 
@@ -542,14 +477,111 @@ function RecoveryDualPanelLive({ scenario, customer, onReset }) {
           </div>
         </div>
 
-        {/* ── RIGHT: what the customer sees on their own device ── */}
+        {/* ── RIGHT: mandate sequence is silent/bank-side, everything else is customer-facing ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#25D366' }} /> 📲 On {customer?.name || 'the customer'}'s own device
-          </div>
-          <DeliveredPreview channel={action?.channel} message={messageContent} customer={customer} outcome={outcome} amountRecovered={amountRecovered} />
+          {isMandateFlow ? (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--rzp-blue)' }} /> 🏦 Bank-side — silent, no customer contact
+              </div>
+              <MandateSequencePanel transactionId={transactionId} messageContent={messageContent} outcome={outcome} amountRecovered={amountRecovered} />
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <div style={{ width: 6, height: 6, borderRadius: '50%', background: '#25D366' }} /> 📲 On {customer?.name || 'the customer'}'s own device
+              </div>
+              <DeliveredPreview channel={action?.channel} message={messageContent} customer={customer} outcome={outcome} amountRecovered={amountRecovered} />
+            </>
+          )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ─── Mandate retry sequence — real RBI-style pre-debit notice + bank-side retry ──
+// This is a silent, no-customer-interaction e-mandate flow, so instead of a "device
+// preview" the admin gets a real control to advance the sequence once the pre-debit
+// notice window elapses (or skip the wait for demo purposes — clearly labeled as such).
+function MandateSequencePanel({ transactionId, messageContent, outcome, amountRecovered }) {
+  const [status, setStatus] = useState(null);
+  const [advancing, setAdvancing] = useState(false);
+  const [error, setError] = useState(null);
+
+  const refresh = () => {
+    if (!transactionId) return;
+    axios.get(`/api/mandate/status/${transactionId}`).then(r => setStatus(r.data)).catch(() => {});
+  };
+
+  useEffect(() => { refresh(); }, [transactionId, messageContent]);
+
+  const advance = async (force) => {
+    setAdvancing(true);
+    setError(null);
+    try {
+      await axios.post('/api/mandate/advance', { transactionId, force });
+      refresh();
+    } catch (err) {
+      setError(err.response?.data?.error || 'Could not advance the sequence.');
+    }
+    setAdvancing(false);
+  };
+
+  const recovered = outcome === 'recovered';
+  const escalated = outcome === 'escalated';
+  const windowOpen = status?.nextMandateRetryAt ? new Date(status.nextMandateRetryAt) <= new Date() : false;
+
+  if (!messageContent) {
+    return (
+      <div style={{ padding: 28, textAlign: 'center', color: 'var(--text-muted)', border: '1px dashed var(--border)', borderRadius: 8 }}>
+        <div style={{ fontSize: 24, marginBottom: 8 }}>⏳</div>
+        <div style={{ fontSize: 12 }}>Diagnosing and deciding the recovery action…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 12, overflow: 'hidden' }}>
+        <div style={{ background: 'var(--surface-2)', padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: '50%', background: 'var(--rzp-blue-50)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 13, color: 'var(--rzp-blue)' }}>🏦</div>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>e-Mandate pre-debit notice · attempt {status?.retryCount ?? '?'}/{status?.maxRetries ?? 3}</div>
+        </div>
+        <div style={{ padding: 14 }}>
+          <div style={{ background: 'white', borderRadius: 6, padding: '10px 12px', fontSize: 12, lineHeight: 1.6, whiteSpace: 'pre-wrap', border: '1px solid var(--border-light)' }}>{messageContent}</div>
+        </div>
+      </div>
+
+      {recovered ? (
+        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--green-bg)', border: '1px solid rgba(14,163,113,0.2)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--green)' }}>✅ Recovered · ₹{Number(amountRecovered).toLocaleString('en-IN')}</div>
+          <div style={{ fontSize: 11, color: '#065F46', marginTop: 2 }}>Auto-debit retry succeeded — no customer contact was needed.</div>
+        </div>
+      ) : escalated ? (
+        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--red-bg)', border: '1px solid rgba(229,72,77,0.2)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--red)' }}>🛑 Mandate retry limit reached</div>
+          <div style={{ fontSize: 11, color: '#9B1C1C', marginTop: 2 }}>Governance stopping rule (max 3 retries) hit — this now needs human/dunning follow-up.</div>
+        </div>
+      ) : (
+        <div style={{ padding: '10px 14px', borderRadius: 8, background: 'var(--amber-bg)', border: '1px solid rgba(192,139,0,0.2)' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#78350F' }}>⏳ Awaiting next auto-debit retry</div>
+          <div style={{ fontSize: 11, color: '#92400E', marginTop: 2 }}>
+            {status?.nextMandateRetryAt
+              ? `Real RBI notice window: eligible at ${new Date(status.nextMandateRetryAt).toLocaleString('en-IN')}${windowOpen ? ' — window is now open' : ''}`
+              : 'Loading schedule…'}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button onClick={() => advance(false)} disabled={advancing || !windowOpen} className="btn btn-primary btn-sm">
+              {advancing ? 'Attempting…' : windowOpen ? '🏦 Attempt retry now' : '🔒 Waiting for window'}
+            </button>
+            <button onClick={() => advance(true)} disabled={advancing} className="btn btn-secondary btn-sm" title="Bypasses the 24h RBI notice window — demo only, the real rule is still enforced above">
+              ⏩ Skip wait (demo)
+            </button>
+          </div>
+          {error && <div style={{ marginTop: 8, fontSize: 11, color: 'var(--red)' }}>{error}</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -588,6 +620,8 @@ export default function RecoveryLive() {
   const [selectedCustomer, setSelectedCustomer] = useState('');
   const [selectedScenario, setSelectedScenario] = useState(null);
   const [activeView,       setActiveView]       = useState('picker'); // picker | panel
+  const [failedTxs, setFailedTxs] = useState([]);
+  const [loadingTxs, setLoadingTxs] = useState(false);
 
   useEffect(() => {
     axios.get('/api/checkout/customers').then(r => {
@@ -597,13 +631,39 @@ export default function RecoveryLive() {
     }).catch(() => {});
   }, []);
 
+  // Real failed transactions for whichever customer is selected — replaces the old
+  // canned scenario cards with actual failures that happened in the real Store.
+  useEffect(() => {
+    if (!selectedCustomer) { setFailedTxs([]); return; }
+    setLoadingTxs(true);
+    axios.get(`/api/recovery-live/failed-transactions/${selectedCustomer}`)
+      .then(r => setFailedTxs(r.data || []))
+      .catch(() => setFailedTxs([]))
+      .finally(() => setLoadingTxs(false));
+  }, [selectedCustomer, activeView]);
+
   const customer = customers.find(c => c._id === selectedCustomer);
+
+  const handleLaunchRealFailure = (tx) => {
+    handleLaunch({
+      id: tx._id,
+      label: `Recover: ${(tx.errorCode || 'Payment Failure').replace(/_/g, ' ')}`,
+      icon: FAILURE_ICONS[tx.errorCode] || '⚠️',
+      badge: 'LIVE',
+      badgeColor: '#0EA371',
+      errorCode: tx.errorCode,
+      failMsg: tx.errorReason || 'Payment failed.',
+      amount: tx.amount,
+      productName: tx.description || tx.category,
+      transactionId: tx._id,
+    });
+  };
 
   const handleLaunch = (sc) => { setSelectedScenario(sc); setActiveView('panel'); };
   const handleReset  = () => { setActiveView('picker'); setSelectedScenario(null); };
 
   const grouped = CATEGORY_ORDER.map(cat => ({ cat, items: RECOVERY_SCENARIOS.filter(s => s.category === cat) }));
-  const BADGE_COLORS = { AI:'#6E56CF', L1:'var(--green)', L2:'var(--rzp-blue)', L3:'#C08B00', L4:'var(--purple)', L5:'var(--red)' };
+  const BADGE_COLORS = { AI:'#6E56CF', L1:'var(--green)', L2:'var(--rzp-blue)', L3:'#C08B00', L4:'var(--purple)', L5:'var(--red)', LIVE:'#0EA371' };
 
   return (
     <>
@@ -640,6 +700,43 @@ export default function RecoveryLive() {
               </div>
             </div>
 
+            {/* Real failed transactions — actual failures from the Store, not canned amounts */}
+            <div className="card">
+              <div className="card-header">
+                <div className="card-title">👤 Customer Action Needed — Real Failed Payments</div>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{failedTxs.length} failure{failedTxs.length !== 1 ? 's' : ''}</span>
+              </div>
+              <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="infobox infobox-blue" style={{ fontSize: 11 }}>
+                  👤 These are this customer's actual failed transactions from the Store — pick one to run it through the real recovery pipeline with its real amount and error.
+                </div>
+                {loadingTxs ? (
+                  <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 12 }}>Loading…</div>
+                ) : failedTxs.length === 0 ? (
+                  <div className="empty-state">
+                    <div className="empty-state-icon">💳</div>
+                    <div className="empty-state-title">No real failures yet</div>
+                    <div className="empty-state-desc">Go to the Store and fail a payment with this customer — it'll show up here.</div>
+                  </div>
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                    {failedTxs.map(tx => (
+                      <ScenarioCard key={tx._id}
+                        sc={{
+                          icon: FAILURE_ICONS[tx.errorCode] || '⚠️',
+                          badge: 'LIVE',
+                          label: (tx.errorCode || 'Payment Failure').replace(/_/g, ' '),
+                          amount: tx.amount,
+                          productName: tx.errorReason || tx.category,
+                        }}
+                        badgeColor={BADGE_COLORS.LIVE}
+                        onClick={() => handleLaunchRealFailure(tx)} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
             {/* Scenario groups */}
             {grouped.map(({ cat, items }) => (
               <div key={cat} className="card">
@@ -648,11 +745,6 @@ export default function RecoveryLive() {
                   <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{items.length} scenarios</span>
                 </div>
                 <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {cat === '👤 Customer Action Needed' && (
-                    <div className="infobox infobox-blue" style={{ fontSize: 11 }}>
-                      👤 Launching one of these fires a real transaction through the recovery pipeline — the message and payment link genuinely appear on that customer's own Store session.
-                    </div>
-                  )}
                   {cat === '💬 LLM Conversation' && (
                     <div className="infobox infobox-green" style={{ fontSize: 11 }}>
                       💬 The AI converses with the customer in natural language (including Hinglish). Type the pre-filled reply or edit it to test different customer responses.

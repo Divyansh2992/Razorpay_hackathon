@@ -46,6 +46,10 @@ function openRazorpay({ keyId, orderId, amount, customer, productName, onSuccess
     else onFailed({ code: 'BAD_REQUEST_ERROR', description: 'Your card was declined.' });
     return;
   }
+  // Razorpay calls modal.ondismiss whenever the widget closes — including AFTER it already
+  // called payment.failed and showed its own "try again" screen. Without this guard, closing
+  // that screen reports a second, redundant event for the same attempt.
+  let settled = false;
   const rzp = new window.Razorpay({
     key: keyId,
     amount: amount * 100,
@@ -55,10 +59,10 @@ function openRazorpay({ keyId, orderId, amount, customer, productName, onSuccess
     order_id: orderId,
     prefill: { name: customer.name, email: customer.email, contact: customer.phone || '9999999999' },
     theme: { color: '#2561E8' },
-    modal: { ondismiss: onDismissed },
-    handler: onSuccess,
+    modal: { ondismiss: () => { if (!settled) { settled = true; onDismissed(); } } },
+    handler: (resp) => { settled = true; onSuccess(resp); },
   });
-  rzp.on('payment.failed', r => onFailed(r.error));
+  rzp.on('payment.failed', r => { settled = true; onFailed(r.error); });
   rzp.open();
 }
 
@@ -236,6 +240,7 @@ function IncomingRecoveryNotification({ customerId, customer, onNotify }) {
     const channel = data.actionTaken?.channel;
     const content = data.actionTaken?.messageContent;
     if (!channel || channel === 'none' || !content) return;
+    if (channel === 'voice') return; // handled by the dedicated VoiceRecoveryWidget instead
     setPaid(false);
     setPayError(null);
     setVerified(null);
@@ -248,7 +253,7 @@ function IncomingRecoveryNotification({ customerId, customer, onNotify }) {
     });
     onNotify?.({
       title: `${channel === 'whatsapp' ? '💬 WhatsApp' : channel === 'in_app' ? '🛡️ Security check' : '📧 Email'} — Payment recovery`,
-      body: content.slice(0, 140),
+      body: content,
       dedupeKey: `resolved_${data.transactionId}_${content.length}`,
     });
   });
@@ -378,6 +383,195 @@ function IncomingRecoveryNotification({ customerId, customer, onNotify }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+// ─── Real Hinglish voice recovery — genuine browser TTS/STT, real Groq dialogue ──
+// Fires for a real L5 voice_escalation action. Uses the Web Speech API (no telephony
+// provider needed) to actually speak the agent's lines and listen for the customer's
+// reply; each turn goes through the real /api/conversation/voice-turn endpoint tied
+// to this transaction's real amount. Ends in a real payment, same as every other
+// recovery channel — never a scripted "success".
+function VoiceRecoveryWidget({ customerId, customer }) {
+  const [call, setCall] = useState(null); // { transactionId, amount }
+  const [active, setActive] = useState(false);
+  const [transcript, setTranscript] = useState([]);
+  const [listening, setListening] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [textInput, setTextInput] = useState('');
+  const [paying, setPaying] = useState(false);
+  const [paid, setPaid] = useState(false);
+  const sessionIdRef = useRef(null);
+  const recognitionRef = useRef(null);
+
+  const speechSupported = typeof window !== 'undefined' && !!window.speechSynthesis;
+  const RecognitionCtor = typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  useSocket((type, data) => {
+    if (type !== 'resolved') return;
+    if (String(data.customerId) !== String(customerId)) return;
+    if (data.outcome !== 'pending') return;
+    if (data.actionTaken?.channel !== 'voice') return;
+    sessionIdRef.current = `voice_store_${data.transactionId}_${Date.now().toString(36)}`;
+    setPaid(false);
+    setCall({ transactionId: data.transactionId, amount: data.amount });
+    setTranscript([{ role: 'agent', content: data.actionTaken.messageContent }]);
+  });
+
+  const speak = (text) => {
+    if (!speechSupported) return;
+    setSpeaking(true);
+    const utter = new window.SpeechSynthesisUtterance(text);
+    utter.lang = 'hi-IN';
+    utter.rate = 0.95;
+    utter.onend = () => setSpeaking(false);
+    utter.onerror = () => setSpeaking(false);
+    window.speechSynthesis.speak(utter);
+  };
+
+  const sendTurn = async (message) => {
+    if (!message.trim()) return;
+    setTranscript(p => [...p, { role: 'customer', content: message }]);
+    setTextInput('');
+    try {
+      const { data } = await axios.post('/api/conversation/voice-turn', {
+        sessionId: sessionIdRef.current, message, amount: call.amount
+      });
+      setTranscript(p => [...p, { role: 'agent', content: data.agentResponse }]);
+      speak(data.agentResponse);
+    } catch {
+      setTranscript(p => [...p, { role: 'agent', content: 'Sorry, connection issue — please try again.' }]);
+    }
+  };
+
+  const startListening = () => {
+    if (!RecognitionCtor) return;
+    const rec = new RecognitionCtor();
+    rec.lang = 'hi-IN';
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    rec.onresult = (e) => { sendTurn(e.results[0][0].transcript); };
+    rec.onend = () => setListening(false);
+    rec.onerror = () => setListening(false);
+    recognitionRef.current = rec;
+    setListening(true);
+    rec.start();
+  };
+
+  const stopListening = () => { recognitionRef.current?.stop(); setListening(false); };
+
+  const answerCall = () => {
+    setActive(true);
+    if (transcript[0]) speak(transcript[0].content);
+  };
+
+  const endCall = () => {
+    window.speechSynthesis?.cancel();
+    recognitionRef.current?.stop();
+    setActive(false);
+    setCall(null);
+  };
+
+  const handlePayNow = async () => {
+    setPaying(true);
+    try {
+      const { data: order } = await axios.post('/api/checkout/create-retry-order', { transactionId: call.transactionId });
+      openRazorpay({
+        keyId: order.keyId, orderId: order.orderId, amount: order.amount,
+        customer: order.customer, productName: 'Voice Recovery Payment',
+        onSuccess: async (resp) => {
+          await axios.post('/api/checkout/payment-success', { ...resp, internalId: call.transactionId });
+          setPaid(true);
+          endCall();
+        },
+        onFailed: async (err) => {
+          try {
+            await axios.post('/api/checkout/payment-failed', { razorpay_order_id: order.orderId, internalId: call.transactionId, razorpayError: err });
+          } catch {}
+          setPaying(false);
+        },
+        onDismissed: async () => {
+          try { await axios.post('/api/checkout/payment-abandoned', { razorpay_order_id: order.orderId, internalId: call.transactionId }); } catch {}
+          setPaying(false);
+        },
+      });
+    } catch {
+      setPaying(false);
+    }
+  };
+
+  if (paid) {
+    return (
+      <div className="anim-in" style={{ position: 'fixed', bottom: 96, right: 20, width: 320, zIndex: 610, background: 'white', borderRadius: 14, padding: 24, textAlign: 'center', boxShadow: '0 20px 56px rgba(0,0,0,0.3)' }}>
+        <div style={{ fontSize: 32, marginBottom: 6 }}>✅</div>
+        <div style={{ fontWeight: 700, color: '#0F172A' }}>Paid — thanks for staying on the call!</div>
+      </div>
+    );
+  }
+
+  if (!call) return null;
+
+  return (
+    <div className="anim-in" style={{ position: 'fixed', bottom: 96, right: 20, width: 340, zIndex: 610, borderRadius: 14, overflow: 'hidden', boxShadow: '0 20px 56px rgba(0,0,0,0.3)' }}>
+      <div style={{ background: '#6E56CF', color: 'white', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>📞</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>{active ? 'Recovery Call — Live' : 'Incoming Recovery Call'}</div>
+          <div style={{ fontSize: 10, opacity: 0.85 }}>Razorpay Recovery · Hinglish voice agent</div>
+        </div>
+        {!active && <button onClick={endCall} style={{ background: 'none', border: 'none', color: 'white', cursor: 'pointer', fontSize: 16, opacity: 0.85 }}>×</button>}
+      </div>
+
+      <div style={{ background: '#F8FAFC', padding: 14 }}>
+        {!active ? (
+          <button onClick={answerCall} style={{ width: '100%', padding: '11px', border: 'none', borderRadius: 8, background: '#0EA371', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+            📞 Answer — ₹{Number(call.amount).toLocaleString('en-IN')} overdue
+          </button>
+        ) : (
+          <>
+            <div style={{ maxHeight: 200, overflowY: 'auto', marginBottom: 8, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {transcript.map((m, i) => (
+                <div key={i} className={m.role === 'agent' ? 'chat-msg-agent' : 'chat-msg-customer'}>
+                  <div className="chat-avatar" style={{ background: m.role === 'agent' ? '#6E56CF' : 'var(--border)', color: m.role === 'agent' ? 'white' : 'var(--text-secondary)', width: 24, height: 24, fontSize: 11 }}>
+                    {m.role === 'agent' ? '🎙️' : '👤'}
+                  </div>
+                  <div className={m.role === 'agent' ? 'chat-bubble-agent' : 'chat-bubble-customer'} style={{ fontSize: 12 }}>{m.content}</div>
+                </div>
+              ))}
+              {speaking && <div style={{ fontSize: 11, color: '#6E56CF', paddingLeft: 32 }}>🔊 Agent speaking…</div>}
+            </div>
+
+            {!speechSupported && (
+              <div style={{ fontSize: 10, color: '#94A3B8', marginBottom: 6 }}>Voice not supported in this browser — reply below instead.</div>
+            )}
+
+            <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+              {RecognitionCtor && (
+                <button onClick={listening ? stopListening : startListening} disabled={speaking} style={{
+                  flex: 1, padding: '9px', border: 'none', borderRadius: 8, cursor: speaking ? 'not-allowed' : 'pointer',
+                  background: listening ? '#E5484D' : '#6E56CF', color: 'white', fontSize: 12, fontWeight: 700,
+                }}>
+                  {listening ? '⏹ Stop listening' : '🎤 Speak reply'}
+                </button>
+              )}
+              <input value={textInput} onChange={e => setTextInput(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendTurn(textInput)}
+                placeholder="Or type your reply..." className="input" style={{ flex: 1, fontSize: 12 }} />
+            </div>
+
+            <div style={{ display: 'flex', gap: 6 }}>
+              <button onClick={handlePayNow} disabled={paying} style={{
+                flex: 1, padding: '10px', border: 'none', borderRadius: 8, cursor: paying ? 'not-allowed' : 'pointer',
+                background: '#0EA371', color: 'white', fontSize: 12, fontWeight: 700,
+              }}>
+                {paying ? '⏳ Opening Razorpay…' : `💳 Pay Now ₹${Number(call.amount).toLocaleString('en-IN')}`}
+              </button>
+              <button onClick={endCall} className="btn btn-secondary btn-sm">End Call</button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -515,6 +709,7 @@ export default function CustomerStore() {
   const [currentOrder, setCurrentOrder] = useState(null);
   const [orderHistory, setOrderHistory] = useState([]);
   const [notifOpen, setNotifOpen]     = useState(false);
+  const [expandedNotifId, setExpandedNotifId] = useState(null);
 
   const chatContextRef = useRef({ amount: 0, category: 'checkout' });
 
@@ -657,13 +852,21 @@ export default function CustomerStore() {
                 </div>
                 {notifications.items.length === 0 ? (
                   <div style={{ padding: '28px 14px', textAlign: 'center', color: '#CBD5E1', fontSize: 12 }}>No notifications yet</div>
-                ) : notifications.items.map(n => (
-                  <div key={n.id} style={{ padding: '10px 14px', borderBottom: '1px solid #F8FAFC' }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{n.title}</div>
-                    <div style={{ fontSize: 11, color: '#64748B', marginTop: 2, lineHeight: 1.5 }}>{n.body}</div>
-                    <div style={{ fontSize: 10, color: '#CBD5E1', marginTop: 4 }}>{new Date(n.time).toLocaleTimeString('en-IN')}</div>
-                  </div>
-                ))}
+                ) : notifications.items.map(n => {
+                  const isLong = n.body && n.body.length > 140;
+                  const isExpanded = expandedNotifId === n.id;
+                  return (
+                    <div key={n.id} onClick={() => isLong && setExpandedNotifId(isExpanded ? null : n.id)}
+                      style={{ padding: '10px 14px', borderBottom: '1px solid #F8FAFC', cursor: isLong ? 'pointer' : 'default' }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: '#0F172A' }}>{n.title}</div>
+                      <div style={{ fontSize: 11, color: '#64748B', marginTop: 2, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                        {isExpanded || !isLong ? n.body : `${n.body.slice(0, 140)}…`}
+                      </div>
+                      {isLong && <div style={{ fontSize: 10, color: '#2561E8', fontWeight: 600, marginTop: 4 }}>{isExpanded ? 'Show less' : 'Show more'}</div>}
+                      <div style={{ fontSize: 10, color: '#CBD5E1', marginTop: 4 }}>{new Date(n.time).toLocaleTimeString('en-IN')}</div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -839,6 +1042,9 @@ export default function CustomerStore() {
 
       {/* Real WhatsApp/email recovery notification — from own failures or an admin trigger */}
       <IncomingRecoveryNotification customerId={customerId} customer={customer} onNotify={notifications.push} />
+
+      {/* Real Hinglish voice recovery — genuine browser TTS/STT, tied to a real escalated failure */}
+      <VoiceRecoveryWidget customerId={customerId} customer={customer} />
 
       {/* Floating AI assistant — free-form chat, ask anything any time */}
       <RecoveryChatWidget contextRef={chatContextRef} />

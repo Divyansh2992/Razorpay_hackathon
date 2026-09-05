@@ -58,6 +58,19 @@ function decide(diagnosis, transaction, customer) {
     };
   }
 
+  // 🔧 Rule: subscription/mandate failure (temporary or infra-side) → real e-mandate
+  // retry sequencer (pre-debit notice → wait → bank-side auto-debit retry), not a
+  // single silent retry. Scoped to subscription category — one-time checkout/invoice
+  // failures have no mandate to retry. Stops once governance's MAX_RETRIES is hit.
+  if (category === 'subscription' && (bucket === 'soft_decline' || bucket === 'infra_glitch') && retryCount < 3) {
+    return {
+      funnelLevel: 1,
+      actionType: 'mandate_retry_sequence',
+      channel: 'none',
+      reasoning: `Subscription ${bucket} — starting RBI-compliant mandate retry sequence (attempt ${retryCount + 1}/3)`
+    };
+  }
+
   // 🔧 Escalation rule: repeated failure + high value → Level 4 or 5
   if (retryCount >= ESCALATION_RETRY_COUNT && amount >= ESCALATION_THRESHOLD_AMOUNT) {
     if (category === 'invoice') {

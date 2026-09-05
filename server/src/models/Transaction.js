@@ -20,6 +20,10 @@ const transactionSchema = new mongoose.Schema({
   forceFailureType: String,
   retryCount: { type: Number, default: 0 },
   maxRetries: { type: Number, default: 3 },
+  // Mandate/e-NACH retry sequencing (RBI recurring-payment framework: pre-debit
+  // notice required before each auto-debit retry attempt)
+  mandateNoticeSentAt: Date,
+  nextMandateRetryAt: Date,
   dueDate: Date,
   promiseToPayDate: Date,
   merchantId: { type: String, default: 'RAZORPAY_DEMO_MERCHANT' },

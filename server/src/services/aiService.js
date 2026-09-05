@@ -215,6 +215,32 @@ Repeat customer: ${isRepeatCustomer ? 'yes' : 'no'}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 🧠 e-Mandate pre-debit notification (RBI recurring-payment framework requires
+// this be sent ahead of every auto-debit retry attempt, stating amount/date/opt-out)
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateMandateNotice({ name, amount, category, attemptNumber, maxAttempts, retryAt }) {
+  const systemPrompt = `You are writing an RBI-compliant e-mandate pre-debit notification for an Indian fintech platform (Razorpay).
+This is a legally required notice sent before auto-debiting a recurring payment. It MUST state: the exact amount, the exact date/time of the upcoming debit attempt, and that the customer can decline/manage the mandate.
+Keep it short (3-4 sentences), formal but not scary. Return ONLY the message text.`;
+
+  const userMessage = `Customer: ${name}
+Amount to be auto-debited: ₹${amount}
+Category: ${category}
+Debit attempt: #${attemptNumber} of ${maxAttempts}
+Scheduled debit time: ${retryAt}`;
+
+  const raw = await callGroq(systemPrompt, userMessage);
+
+  if (!raw) {
+    return {
+      message: `Hi ${name}, this is a reminder that we'll attempt to auto-debit ₹${amount} for your ${category} on ${retryAt} (attempt ${attemptNumber} of ${maxAttempts}). If you'd like to update your payment method or cancel this mandate, please reply to this message. No action is needed if everything looks correct.`,
+      method: 'llm', isMock: true
+    };
+  }
+  return { message: raw.trim(), method: 'llm', isMock: false };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 🧠 FR-3.9: Hinglish voice conversation turn
 // ─────────────────────────────────────────────────────────────────────────────
 async function generateVoiceTurn({ amount, daysOverdue, conversationHistory, lastMessage }) {
@@ -265,6 +291,7 @@ module.exports = {
   classifyReplyIntent,
   classifyOtpIssue,
   generateNudgeMessage,
+  generateMandateNotice,
   generateVoiceTurn,
   generateChatResponse
 };

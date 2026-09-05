@@ -24,7 +24,8 @@ const recoveryEventSchema = new mongoose.Schema({
       enum: [
         'silent_retry', 'alt_payment_method', 'scheduled_retry',
         'nudge_link', 'in_app_prompt', 'ai_conversation',
-        'voice_escalation', 'invoice_reminder', 'none', 'blocked_governance'
+        'voice_escalation', 'invoice_reminder', 'none', 'blocked_governance',
+        'mandate_pre_debit_notice', 'mandate_retry_attempt'
       ]
     },
     channel: {

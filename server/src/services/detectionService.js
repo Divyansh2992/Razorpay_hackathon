@@ -12,6 +12,7 @@ const diagnosisService = require('./diagnosisService');
 const decisionEngine = require('./decisionEngine');
 const actionService = require('./actionService');
 const governanceService = require('./governanceService');
+const mandateService = require('./mandateService');
 const eventBus = require('../eventBus');
 
 let io = null; // Injected from index.js
@@ -198,6 +199,9 @@ async function processPaymentEvent(payload) {
       case 'ai_conversation':
       case 'voice_escalation':
         result = await actionService.executeEscalation(transaction, customer, reloadedEvent, decision.funnelLevel);
+        break;
+      case 'mandate_retry_sequence':
+        result = await mandateService.startSequence(transaction, customer, reloadedEvent);
         break;
       default:
         result = { success: false };
