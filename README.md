@@ -2,72 +2,136 @@
 
 **Razorpay Hackathon — Track 03: Recover Revenue Automatically**
 
-An agent that detects revenue at risk — failed payments, checkout abandonment, overdue B2B invoices, and silent reconciliation gaps — diagnoses the real cause, and runs a bounded, governed recovery workflow to win it back automatically. Every number on the dashboard ties back to a real transaction and a real audit-trail entry.
-
 Solo submission.
 
----
+When a payment fails — a declined card, an abandoned checkout, an overdue B2B invoice, or a payment that actually succeeded but the system never found out — that revenue isn't gone, it's just unrecovered. This agent watches for exactly these moments, figures out the real reason using rules and an LLM, and runs a bounded, governed recovery workflow to win the money back automatically. Every number on the dashboard ties back to a real transaction and a real audit-trail entry — nothing is a canned demo number.
 
-## What it does
+## Contents
 
-When a payment fails, revenue isn't gone — it's just unrecovered. This agent:
+- [How it works](#how-it-works)
+- [The escalation ladder](#the-escalation-ladder)
+- [Failure types it handles](#failure-types-it-handles)
+- [What's real vs. simulated](#whats-real-vs-simulated)
+- [Screenshots](#screenshots)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Running it locally](#running-it-locally)
+- [Governance guardrails](#governance-guardrails)
 
-1. **Detects** the failure the moment it happens (real Razorpay checkout events, not polling).
-2. **Diagnoses** the cause — a rule table resolves ~80% of cases instantly; the rest go to a Groq LLM to reason over the customer's history.
-3. **Decides** the right response on an escalation ladder that starts as quiet as possible and only climbs if it has to.
-4. **Acts** — silently retries, sends a personalized nudge, asks for in-app verification, opens a full AI conversation, or escalates to voice/human — always inside governance guardrails (retry caps, contact caps, opt-outs, RBI pre-debit notice compliance).
-5. **Proves it** — a live dashboard tracks ₹ at risk vs. ₹ recovered, broken down by escalation level and category, with a full audit trail.
+## How it works
+
+Every failure — whatever triggers it — goes through the same five-stage pipeline:
+
+```
+Detect → Diagnose → Decide → Govern → Act
+```
+
+1. **Detect** — a real event fires the moment something goes wrong: a Razorpay checkout failure, a dismissed payment popup, an overdue invoice, a subscription charge failure. No polling.
+2. **Diagnose** — the failure's error code is looked up in a rule table first (covers roughly 80% of real-world cases instantly and deterministically). Anything the rules don't recognize is handed to a Groq LLM, which reasons over the actual error and the customer's recent payment history to classify it.
+3. **Decide** — a decision engine maps the diagnosis to a point on the escalation ladder (below), factoring in the customer's payment methods, retry count, and transaction value.
+4. **Govern** — before anything is sent, a governance layer checks stopping rules: has this customer already been contacted too many times, have we already retried 3 times, did they opt out, is there an active dispute, does RBI's e-mandate pre-debit notice window still need to elapse. Any violation blocks the action and logs why.
+5. **Act** — the chosen action actually runs: a silent retry, a real WhatsApp-style nudge with a working payment link, an in-app verification prompt, a full AI conversation, or an escalation. The outcome is written to a `RecoveryEvent` and pushed live over Socket.io, so the admin dashboard and the customer's own screen update instantly, no refresh.
 
 ## The escalation ladder
 
-| Level | What happens | When |
+The ladder always starts as quiet as possible and only climbs if it has to:
+
+| Level | What happens | When | Why |
+|---|---|---|---|
+| **L1 — Silent** | Fixed in the background; the customer never sees anything | Infra glitches, or a backup payment method exists | No point bothering the customer for something the system can just fix itself |
+| **L2 — Nudge** | A real message (WhatsApp-style) with a working payment link | Card declined/expired, cart abandonment, ambiguous failures | The customer has to act, so give them the easiest possible path to act |
+| **L3 — In-app verify** | Ask the customer to confirm "was this really you?" | A possible false fraud block | The system itself might be wrong — the customer's own answer is the actual verification |
+| **L4 — AI conversation** | A full back-and-forth with the recovery agent | A nudge alone didn't resolve it | Needs more than a link — needs a real conversation to understand what's going on |
+| **L5 — Escalation** | Voice call or human handoff | High-value payments with repeated failures | The stakes are high enough that automation alone shouldn't decide |
+
+## Failure types it handles
+
+| Failure | Where it's triggered | Recovery mechanism |
 |---|---|---|
-| **L1 — Silent** | Fixed in the background, customer never sees it | Infra glitches, or a backup payment method exists |
-| **L2 — Nudge** | A WhatsApp-style message with a real payment link | Declined or expired card, generic ambiguous failures |
-| **L3 — In-app verify** | Ask the customer to confirm it was really them | Possible false fraud block |
-| **L4 — AI conversation** | A full back-and-forth with the recovery agent | A nudge alone wasn't enough |
-| **L5 — Escalation** | Voice call or human handoff | High-value, repeatedly-failing cases |
+| Card declined / expired | Real Razorpay Checkout.js test-mode decline | Diagnosed via rules or LLM → nudge or silent alt-method retry |
+| Checkout abandonment | Customer closes the payment popup | LLM writes a personalized WhatsApp-style message, pushed live to the customer's screen |
+| OTP timeout / auth friction | Real Razorpay OTP-step failure | Sub-cause classified (not received, expired, wrong number, etc.) and routed to a specific fix |
+| Subscription / e-mandate failure | Recurring charge failure | A real retry sequencer — RBI-compliant pre-debit notice, wait window, then a bank-side retry — not a single blind retry |
+| Payment succeeded, record never updated | Dropped webhook, closed tab, UPI app-switch | Reconciliation engine calls Razorpay's real API directly, diffs it against the internal record field-by-field, and self-corrects |
+| Overdue B2B invoice | Business customer's plain-English reply | Intent classified (promise to pay, dispute, confirmation) — never auto-applied, always queued for admin approval |
+
+## What's real vs. simulated
+
+This was a deliberate rule throughout the build: **never fake an outcome where a real signal is available.**
+
+- Real Razorpay Orders API, real Checkout.js widget, real signature verification — nothing about the payment flow is mocked.
+- Real Groq LLM calls for every ambiguous diagnosis, every recovery message, and every conversation turn.
+- Fraud-verification "yes/no" comes from the actual customer tapping a button, not a coin flip.
+- The e-mandate retry sequencer respects a real 24-hour RBI pre-debit-notice window before attempting an auto-debit retry.
+- Reconciliation checks Razorpay's live API as the actual source of truth, instead of trusting a client-side callback that may never arrive.
+- The only place probability is intentionally used is for genuinely silent, no-observable-signal background actions — e.g. a bank-side auto-debit retry outcome — where there is no real signal to check in a demo environment.
 
 ## Screenshots
 
+### Home
+Role selection — Admin, Customer, or B2B — each a genuinely separate view into the same live data.
+
+![Home](images/home%20.png)
+
 ### Admin Dashboard
-Live recovery funnel, event stream, and audit trail — every ₹ at risk and ₹ recovered ties back to a real transaction.
+Live recovery funnel (₹ at risk vs. ₹ recovered, by escalation level), event stream, and full audit trail.
 
 ![Admin Dashboard](images/admin%20dashboard.png)
 
 ### Recovery Live
-Trigger real failed transactions and watch the full pipeline — diagnosis, decision, governance, action — run live.
+Launch a real failed transaction and watch the full pipeline — detect, diagnose, decide, govern, act — run live, step by step.
 
 ![Recovery Live](images/recovery%20line.png)
 
 ### Customer Storefront
-The real checkout experience: genuine Razorpay Checkout.js widget, real test-mode declines, and a proactive AI recovery chatbot sitting on the customer's own screen.
+The real checkout experience: genuine Razorpay Checkout.js widget, real test-mode declines, and a proactive AI recovery chatbot that knows the customer's actual failure reason.
 
 ![Customer Layout](images/customer%20layout.png)
 
 ### Reconciliation
-Catches the case where a payment genuinely succeeded on Razorpay's side but the internal record never learned about it — checks Razorpay's real API as the source of truth and shows the actual field-by-field diff, not a narrative.
+Catches payments that genuinely succeeded on Razorpay's side but never got recorded internally. Calls Razorpay's real API and shows the actual field-by-field diff — not a narrative summary.
 
 ![Reconciliation](images/reconcillation.png)
 
 ### B2B Invoices
-Business customers reply in plain English; the AI classifies intent (promise to pay, dispute, confirmation) but never auto-applies — a human always approves before the invoice changes.
+Business customers reply in plain English; the AI classifies what they mean, but a human always approves before anything changes.
 
 ![B2B Invoices](images/b2b%20invoices.png)
 
 ![B2B Portal](images/b2b.png)
 
-### Home
-![Home](images/home%20.png)
-
 ## Tech stack
 
-- **Backend**: Node.js, Express, MongoDB (Mongoose), Socket.io for live sync
+- **Backend**: Node.js, Express, MongoDB (Mongoose), Socket.io for real-time sync
 - **Frontend**: React (Vite), Recharts, Socket.io client
-- **AI**: Groq (LLaMA 3.3 70B) for ambiguous-failure diagnosis, recovery messages, and conversational recovery
-- **Payments**: Real Razorpay integration — Orders API, Checkout.js widget, signature-verified callbacks
+- **AI**: Groq (LLaMA 3.3 70B) — diagnosis, recovery messaging, conversational recovery, admin reasoning
+- **Payments**: Razorpay — Orders API, Checkout.js widget, signature-verified webhooks/callbacks
 
-Nothing in the payment flow or the AI reasoning is mocked — rules only handle the ~80% of cases that don't need judgment, as a cost/speed decision, not a shortcut.
+## Project structure
+
+```
+server/
+  src/
+    routes/          # Express routes — checkout, recoveryLive, invoice, conversation, mandate, dashboard
+    services/
+      diagnosisService.js    # Rule table + LLM fallback for failure classification
+      decisionEngine.js      # Bucket → escalation-level mapping
+      governanceService.js   # Stopping rules: retry/contact caps, opt-outs, disputes, RBI notice
+      actionService.js       # Executes the chosen recovery action
+      mandateService.js      # Real e-mandate retry sequencer
+      detectionService.js    # Event-bus listener that runs the full pipeline
+      aiService.js            # All Groq LLM calls
+  src/models/          # Transaction, Customer, RecoveryEvent (the audit trail)
+client/
+  src/pages/
+    Dashboard.jsx        # Admin recovery funnel + audit trail
+    RecoveryLive.jsx      # Live pipeline trigger + visualizer
+    CustomerStore.jsx     # Real storefront + checkout + recovery chatbot
+    Reconciliation.jsx    # Real-vs-recorded payment diff tool
+    ConversationSim.jsx   # Admin-facing LLM reasoning console
+    InvoiceTracker.jsx    # B2B invoice + reply-classification UI
+images/                # Screenshots used in this README
+```
 
 ## Running it locally
 
@@ -96,12 +160,12 @@ RAZORPAY_KEY_ID=<your Razorpay test-mode key id>
 RAZORPAY_KEY_SECRET=<your Razorpay test-mode key secret>
 ```
 
-Without a Razorpay key configured, checkout falls back to a simulated success/failure prompt so the demo still runs end to end.
+Without a Razorpay key configured, checkout falls back to a simulated success/failure prompt so the demo still runs end to end — but the intended experience uses real Razorpay test-mode keys.
 
 ## Governance guardrails
 
 - Max 3 retries per transaction
 - Max 5 customer contact touches
-- Opt-outs always honored, no exceptions
-- RBI pre-debit notice enforced before any e-mandate auto-debit retry
-- Any dispute intent auto-halts automated recovery and flags for human review
+- Opt-outs are always honored, no exceptions
+- RBI's pre-debit notice window is enforced before any e-mandate auto-debit retry
+- Any dispute intent auto-halts automated recovery and flags the case for human review
