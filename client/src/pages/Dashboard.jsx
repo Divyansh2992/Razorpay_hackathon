@@ -143,9 +143,6 @@ export default function Dashboard() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div className="infobox infobox-blue" style={{ fontSize: 12 }}>
-        ℹ️ This dashboard tracks <strong>at-risk revenue the agent recovered</strong> — payments that failed and were then fixed. A payment that succeeds on the first try never becomes "at risk," so it won't appear here; go check out with a Razorpay test card that <em>fails</em> to see the pipeline in action.
-      </div>
       {/* Metric row */}
       <div style={{ display: 'grid', gridTemplateColumns: '1.8fr 1fr 1fr 1fr 1fr 1fr', gap: 14 }}>
         {/* Big recovered card */}

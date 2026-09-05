@@ -10,7 +10,7 @@ const recoveryEventSchema = new mongoose.Schema({
   diagnosis: {
     bucket: {
       type: String,
-      enum: ['hard_decline', 'soft_decline', 'auth_friction', 'fraud_fp', 'infra_glitch', 'ambiguous', 'pending']
+      enum: ['hard_decline', 'soft_decline', 'auth_friction', 'fraud_fp', 'infra_glitch', 'ambiguous', 'pending', 'reconciliation_mismatch']
     },
     method: { type: String, enum: ['rule', 'llm', 'pending'] },
     llmReasoning: String,
@@ -25,7 +25,7 @@ const recoveryEventSchema = new mongoose.Schema({
         'silent_retry', 'alt_payment_method', 'scheduled_retry',
         'nudge_link', 'in_app_prompt', 'ai_conversation',
         'voice_escalation', 'invoice_reminder', 'none', 'blocked_governance',
-        'mandate_pre_debit_notice', 'mandate_retry_attempt'
+        'mandate_pre_debit_notice', 'mandate_retry_attempt', 'reconciliation_auto_fix'
       ]
     },
     channel: {

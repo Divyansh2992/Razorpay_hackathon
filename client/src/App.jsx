@@ -7,6 +7,7 @@ import { useNotifications } from './hooks/useNotifications';
 import Dashboard from './pages/Dashboard';
 import ConversationSim from './pages/ConversationSim';
 import InvoiceTracker from './pages/InvoiceTracker';
+import Reconciliation from './pages/Reconciliation';
 import RecoveryLive from './pages/RecoveryLive';
 import LoginPage from './pages/LoginPage';
 import CustomerStore from './pages/CustomerStore';
@@ -39,6 +40,12 @@ const icons = {
       <line x1="5" y1="10.5" x2="8" y2="10.5" strokeLinecap="round"/>
     </svg>
   ),
+  reconcile: (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" width="15" height="15">
+      <path d="M2 8a6 6 0 0 1 10.5-4M14 8a6 6 0 0 1-10.5 4" strokeLinecap="round"/>
+      <path d="M12.5 1.5v3h-3M3.5 14.5v-3h3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  ),
 };
 
 const PAGE_TITLES = {
@@ -46,6 +53,7 @@ const PAGE_TITLES = {
   '/recovery-live':  { title: 'Recovery Live',        sub: 'Admin + Customer dual-panel · LLM reasoning · AI auto-recovery' },
   '/conversation':   { title: 'LLM Reasoning Preview', sub: 'Sandbox — try the real Groq model, disconnected from live transactions' },
   '/invoices':       { title: 'B2B Invoice Recovery', sub: 'Staged reminders · Promise-to-pay tracking · AI intent' },
+  '/reconciliation': { title: 'Reconciliation',       sub: 'Cross-check against Razorpay\'s real records · Auto-recover untracked payments' },
 };
 
 // ─── Admin Sidebar ────────────────────────────────────────────────────────────
@@ -93,6 +101,7 @@ function AdminSidebar() {
         { to: '/recovery-live',           icon: icons.live,    label: 'Recovery Live' },
         { to: '/conversation',            icon: icons.chat,    label: 'LLM Reasoning Preview' },
         { to: '/invoices',                icon: icons.invoice, label: 'B2B Invoices' },
+        { to: '/reconciliation',          icon: icons.reconcile, label: 'Reconciliation' },
       ].map(({ to, end, icon, label }) => (
         <NavLink key={to} to={to} end={end}
           className={({ isActive }) => `sidebar-item${isActive ? ' active' : ''}`}>
@@ -273,6 +282,7 @@ function AdminLayout() {
             <Route path="/recovery-live" element={<RecoveryLive />} />
             <Route path="/conversation"  element={<ConversationSim />} />
             <Route path="/invoices"      element={<InvoiceTracker />} />
+            <Route path="/reconciliation" element={<Reconciliation />} />
             <Route path="*"              element={<Navigate to="/" replace />} />
           </Routes>
         </div>

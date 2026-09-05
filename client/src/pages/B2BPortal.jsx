@@ -256,10 +256,6 @@ export default function B2BPortal() {
       </div>
 
       <div style={{ maxWidth: 760, margin: '0 auto', padding: '28px 24px' }}>
-        <div className="infobox infobox-purple" style={{ marginBottom: 20, fontSize: 12 }}>
-          🏢 This is the <strong>separate B2B account</strong> your vendor's Admin cannot log into on your behalf. Replies you send here are classified by AI in real time, but only take effect on your invoice once your vendor's admin reviews and approves them.
-        </div>
-
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2,1fr)', gap: 14, marginBottom: 20 }}>
           <div className="metric-card" style={{ border: '1px solid rgba(229,72,77,0.2)' }}>
             <div className="metric-label">⚠️ Overdue</div>

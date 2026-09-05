@@ -52,6 +52,102 @@ function mapRazorpayError(rzpErrorCode, rzpDescription) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Reconciliation — the real fix for "payment captured but order stuck pending".
+// A client-side callback (browser closed, network drop, UPI app-switch the customer
+// never returned from) is not the source of truth — Razorpay's own records are. This
+// asks Razorpay directly whether a "failed"/"pending"/"abandoned" order actually has a
+// captured payment against it, and if so, corrects our record — no customer contact
+// needed, because the customer already paid; our tracking was just wrong.
+// ─────────────────────────────────────────────────────────────────────────────
+async function reconcileTransaction(transaction) {
+  const customerId = transaction.customerId?._id || transaction.customerId; // handle populated or raw
+  const trace = []; // every real step taken, in order — so the UI can show the actual reasoning, not just a verdict
+  const apiCall = { method: 'orders.fetchPayments', endpoint: `/v1/orders/${transaction.razorpayOrderId}/payments` };
+  const ourRecord = { status: transaction.status, amount: transaction.amount, errorCode: transaction.errorCode || null };
+
+  trace.push({ label: `Calling Razorpay API: GET ${apiCall.endpoint}` });
+
+  if (!razorpay || !transaction.razorpayOrderId) {
+    trace.push({ label: 'No real Razorpay order on this transaction — nothing to verify against.', ok: false });
+    return { checked: false, mismatch: false, reason: 'No real Razorpay order to verify against', trace, apiCall, ourRecord };
+  }
+  if (['recovered', 'succeeded'].includes(transaction.status)) {
+    trace.push({ label: `Already marked "${transaction.status}" — skipping.`, ok: true });
+    return { checked: false, mismatch: false, reason: 'Already marked settled', trace, apiCall, ourRecord };
+  }
+
+  let payments;
+  try {
+    const result = await razorpay.orders.fetchPayments(transaction.razorpayOrderId);
+    payments = result.items || [];
+    trace.push({ label: `Response: ${payments.length} payment attempt${payments.length !== 1 ? 's' : ''} returned.`, ok: true });
+  } catch (err) {
+    trace.push({ label: `Request failed: ${err.message}`, ok: false });
+    return { checked: true, mismatch: false, reason: `Could not reach Razorpay: ${err.message}`, trace, apiCall, ourRecord };
+  }
+
+  const allPayments = payments.map(p => ({ id: p.id, status: p.status, amount: p.amount / 100, method: p.method, created_at: p.created_at }));
+  const capturedPayment = payments.find(p => p.status === 'captured' || p.status === 'authorized');
+
+  if (!capturedPayment) {
+    const razorpayRecord = { status: 'no successful payment', paymentCount: payments.length };
+    trace.push({ label: 'Compared: our status vs. Razorpay\'s payment list — they agree, this genuinely was not paid.', ok: true });
+    return { checked: true, mismatch: false, reason: 'Razorpay confirms no successful payment exists for this order', trace, apiCall, ourRecord, razorpayRecord, allPayments };
+  }
+
+  // Genuine mismatch — Razorpay says paid, we said otherwise. Auto-correct.
+  const previousStatus = transaction.status;
+  const razorpayRecord = {
+    paymentId: capturedPayment.id, status: capturedPayment.status,
+    amount: capturedPayment.amount / 100, method: capturedPayment.method,
+    capturedAt: capturedPayment.created_at ? new Date(capturedPayment.created_at * 1000).toLocaleString('en-IN') : null
+  };
+  trace.push({ label: `Compared field-by-field: status "${previousStatus}" (ours) ≠ "${capturedPayment.status}" (Razorpay's) for the same order.`, ok: false, isMismatch: true });
+
+  await Transaction.findByIdAndUpdate(transaction._id, {
+    status: 'recovered',
+    razorpayPaymentId: capturedPayment.id,
+    errorCode: null,
+    errorReason: null
+  });
+
+  const messageContent = `Our system had this marked "${previousStatus}", but Razorpay's own records show payment ${capturedPayment.id} was actually ${capturedPayment.status} for ₹${transaction.amount} (via ${capturedPayment.method}) — likely a dropped confirmation callback (browser closed, network drop, or a UPI app-switch the customer never returned from). Auto-reconciled directly against Razorpay; no customer contact needed since they already paid.`;
+
+  const recoveryEvent = await RecoveryEvent.create({
+    transactionId: transaction._id,
+    customerId,
+    category: transaction.category,
+    amount: transaction.amount,
+    diagnosis: { bucket: 'reconciliation_mismatch', method: 'rule', confidence: 1.0 },
+    actionTaken: {
+      funnelLevel: 1,
+      type: 'reconciliation_auto_fix',
+      channel: 'none',
+      method: 'rule',
+      messageContent
+    },
+    outcome: 'recovered',
+    amountRecovered: transaction.amount
+  });
+
+  trace.push({ label: `Wrote correction: Transaction.status "${previousStatus}" → "recovered", razorpayPaymentId set to ${capturedPayment.id}.`, ok: true });
+  trace.push({ label: `Recovered ✓ ₹${transaction.amount.toLocaleString('en-IN')} — audit trail written, no customer message sent.`, ok: true, isFinal: true });
+
+  emitLive('event:resolved', {
+    recoveryEventId: recoveryEvent._id, transactionId: transaction._id,
+    customerId, amount: transaction.amount,
+    outcome: 'recovered', amountRecovered: transaction.amount,
+    actionTaken: recoveryEvent.actionTaken, diagnosis: recoveryEvent.diagnosis, status: 'resolved'
+  });
+
+  return {
+    checked: true, mismatch: true, paymentId: capturedPayment.id, amount: transaction.amount,
+    method: capturedPayment.method, previousStatus, message: messageContent, trace,
+    apiCall, ourRecord, razorpayRecord, allPayments
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // POST /api/checkout/create-order
 // Creates a real Razorpay order (or mock if keys not set)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,13 +428,24 @@ router.post('/payment-abandoned', async (req, res) => {
   try {
     const { razorpay_order_id, internalId } = req.body;
 
-    const transaction = await Transaction.findOneAndUpdate(
-      { $or: [{ _id: internalId }, { razorpayOrderId: razorpay_order_id }] },
+    const found = await Transaction.findOne({ $or: [{ _id: internalId }, { razorpayOrderId: razorpay_order_id }] });
+    if (!found) return res.status(404).json({ error: 'Transaction not found' });
+
+    // Before assuming abandonment, check reality: the modal closing is not proof the
+    // customer didn't pay — a UPI app-switch they never returned from, or the browser
+    // closing right as the widget's success callback was firing, both look identical
+    // to a dismiss but can leave a genuinely captured payment behind.
+    const reconciliation = await reconcileTransaction(found);
+    if (reconciliation.mismatch) {
+      console.log(`[Checkout] Dismiss looked like abandonment, but Razorpay confirms payment ${reconciliation.paymentId} was captured — reconciled automatically`);
+      return res.json({ success: true, reconciled: true, message: 'Payment was actually already captured — reconciled automatically, no recovery needed' });
+    }
+
+    const transaction = await Transaction.findByIdAndUpdate(
+      found._id,
       { status: 'abandoned', errorCode: 'ABANDONED', errorReason: 'Customer dismissed the payment popup without completing payment' },
       { new: true }
     );
-
-    if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
 
     eventBus.emit('order.abandoned', {
       event: 'order.abandoned',
@@ -348,6 +455,63 @@ router.post('/payment-abandoned', async (req, res) => {
 
     console.log('[Checkout] order.abandoned fired — modal was dismissed');
     res.json({ success: true, recoveryActivated: true, message: 'Abandonment recovery started' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /api/checkout/reconciliation-candidates
+// Transactions that might have a captured-but-untracked payment behind them.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/reconciliation-candidates', async (req, res) => {
+  try {
+    const candidates = await Transaction.find({ status: { $in: ['pending', 'failed', 'abandoned'] } })
+      .populate('customerId', 'name email')
+      .sort({ createdAt: -1 })
+      .limit(50);
+    res.json(candidates);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/checkout/reconcile — recheck ONE transaction against Razorpay's real records
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/reconcile', async (req, res) => {
+  try {
+    const { transactionId } = req.body;
+    const transaction = await Transaction.findById(transactionId);
+    if (!transaction) return res.status(404).json({ error: 'Transaction not found' });
+    const result = await reconcileTransaction(transaction);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/checkout/reconcile-sweep — recheck every open transaction in one pass,
+// the same job a real payments team would run on a schedule.
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/reconcile-sweep', async (req, res) => {
+  try {
+    const candidates = await Transaction.find({ status: { $in: ['pending', 'failed', 'abandoned'] } })
+      .populate('customerId', 'name')
+      .limit(100);
+    const results = [];
+    for (const tx of candidates) {
+      const result = await reconcileTransaction(tx);
+      results.push({ transactionId: tx._id, customerName: tx.customerId?.name, amount: tx.amount, ...result });
+    }
+    const fixed = results.filter(r => r.mismatch);
+    res.json({
+      checked: candidates.length,
+      mismatchesFixed: fixed.length,
+      amountRecovered: fixed.reduce((s, r) => s + (r.amount || 0), 0),
+      results
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

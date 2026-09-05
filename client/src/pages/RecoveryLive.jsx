@@ -707,9 +707,6 @@ export default function RecoveryLive() {
                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{failedTxs.length} failure{failedTxs.length !== 1 ? 's' : ''}</span>
               </div>
               <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <div className="infobox infobox-blue" style={{ fontSize: 11 }}>
-                  👤 These are this customer's actual failed transactions from the Store — pick one to run it through the real recovery pipeline with its real amount and error.
-                </div>
                 {loadingTxs ? (
                   <div style={{ textAlign: 'center', padding: 20, color: 'var(--text-muted)', fontSize: 12 }}>Loading…</div>
                 ) : failedTxs.length === 0 ? (
@@ -745,11 +742,6 @@ export default function RecoveryLive() {
                   <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{items.length} scenarios</span>
                 </div>
                 <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {cat === '💬 LLM Conversation' && (
-                    <div className="infobox infobox-green" style={{ fontSize: 11 }}>
-                      💬 The AI converses with the customer in natural language (including Hinglish). Type the pre-filled reply or edit it to test different customer responses.
-                    </div>
-                  )}
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                     {items.map(sc => (
                       <ScenarioCard key={sc.id} sc={sc} disabled={!selectedCustomer}

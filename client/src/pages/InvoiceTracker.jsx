@@ -263,11 +263,6 @@ export default function InvoiceTracker() {
         </div>
       )}
 
-      {/* Instructions */}
-      <div className="infobox infobox-blue" style={{ marginBottom: 16 }}>
-        <strong>Demo guide:</strong> Click "⚡ Mark Overdue" → then "📧 Next Reminder" to advance stages. Customer replies now come from the separate <strong>B2B User2 portal</strong> — log in there to reply, then come back here (or watch the 🔔 bell) to approve it.
-      </div>
-
       {/* Invoices */}
       {loading ? (
         <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-muted)' }}>Loading invoices...</div>
