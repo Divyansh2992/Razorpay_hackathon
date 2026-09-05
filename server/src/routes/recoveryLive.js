@@ -10,7 +10,7 @@ const eventBus = require('../eventBus');
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/failed-transactions/:customerId', async (req, res) => {
   try {
-    const transactions = await Transaction.find({ customerId: req.params.customerId, status: 'failed' })
+    const transactions = await Transaction.find({ customerId: req.params.customerId, status: { $in: ['failed', 'abandoned'] } })
       .sort({ createdAt: -1 })
       .limit(20);
     res.json(transactions);

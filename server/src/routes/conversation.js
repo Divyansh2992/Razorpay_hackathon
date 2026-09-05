@@ -11,6 +11,33 @@ router.post('/message', async (req, res) => {
     const { sessionId, message, context } = req.body;
     const session = conversations.get(sessionId) || { history: [], type: 'chat' };
 
+    // The real failure reason, when we have one — shared by both roles below so the
+    // answer is specific to what actually happened, never a guess.
+    const failureContext = context?.errorCode
+      ? `The specific reason this ₹${context?.amount || 5000} payment failed: ${context.errorCode} — "${context.errorReason || 'no further detail'}". Answer confidently about THIS reason. Do not list out other unrelated possible causes.`
+      : `No specific failure has happened yet — if asked why a payment failed, ask for more detail rather than guessing a cause.`;
+
+    // ── Admin console mode — the admin is ASKING ABOUT a real failure, not replying
+    // AS the customer, so it gets its own analyst-voice prompt with no customer-intent
+    // classification (that classifier only makes sense for an actual customer reply).
+    if (context?.role === 'admin') {
+      const responseResult = await aiService.generateAdminReasoning({
+        systemContext: `This ${context?.category || 'checkout'} payment belongs to a real customer. ${failureContext}`,
+        conversationHistory: session.history,
+        lastMessage: message
+      });
+
+      session.history.push({ role: 'customer', content: message });
+      session.history.push({ role: 'agent', content: responseResult.message });
+      conversations.set(sessionId, session);
+
+      return res.json({
+        agentResponse: responseResult.message,
+        isMock: responseResult.isMock,
+        history: session.history
+      });
+    }
+
     // 🧠 Classify intent first
     const intentResult = await aiService.classifyReplyIntent({
       replyText: message,
@@ -21,7 +48,8 @@ router.post('/message', async (req, res) => {
 
     // 🧠 Generate contextual AI response
     const responseResult = await aiService.generateChatResponse({
-      systemContext: `The customer had a failed ${context?.category || 'payment'} of ₹${context?.amount || 5000}. 
+      systemContext: `The customer is on a ${context?.category || 'checkout'} order.
+      ${failureContext}
       Their intent has been classified as: ${intentResult.intent}.
       ${intentResult.intent === 'dispute' ? 'Flag for human handoff — do not pursue further automated recovery.' : ''}
       ${intentResult.intent === 'promise_to_pay' ? 'Acknowledge the commitment and suppress further reminders.' : ''}

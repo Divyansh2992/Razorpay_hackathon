@@ -46,9 +46,11 @@ function openRazorpay({ keyId, orderId, amount, customer, productName, onSuccess
     else onFailed({ code: 'BAD_REQUEST_ERROR', description: 'Your card was declined.' });
     return;
   }
-  // Razorpay calls modal.ondismiss whenever the widget closes — including AFTER it already
-  // called payment.failed and showed its own "try again" screen. Without this guard, closing
-  // that screen reports a second, redundant event for the same attempt.
+  // Razorpay's own widget can report payment.failed more than once for the same checkout
+  // session — e.g. its built-in "try again" screen re-submitting the same attempt — and
+  // calls modal.ondismiss whenever the widget closes, including AFTER a failure it already
+  // reported. This guard makes sure only the FIRST failure (or dismissal, or success) for
+  // this widget session ever reaches the backend, so one real incident produces one event.
   let settled = false;
   const rzp = new window.Razorpay({
     key: keyId,
@@ -62,7 +64,7 @@ function openRazorpay({ keyId, orderId, amount, customer, productName, onSuccess
     modal: { ondismiss: () => { if (!settled) { settled = true; onDismissed(); } } },
     handler: (resp) => { settled = true; onSuccess(resp); },
   });
-  rzp.on('payment.failed', r => { settled = true; onFailed(r.error); });
+  rzp.on('payment.failed', r => { if (!settled) { settled = true; onFailed(r.error); } });
   rzp.open();
 }
 
@@ -138,15 +140,18 @@ function OtpHelpChat() {
 }
 
 // ─── Floating AI assistant — free-form chat, ask anything any time ───────────
-function RecoveryChatWidget({ contextRef }) {
+function RecoveryChatWidget({ context }) {
   const [open, setOpen] = useState(false);
   const [msgs, setMsgs] = useState([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [paying, setPaying] = useState(false);
   const [sessionId] = useState(() => `store_${Date.now().toString(36)}`);
   const endRef = useRef(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs, loading, open]);
+
+  const hasActiveFailure = !!context.transactionId && !!context.errorCode;
 
   const send = async (text) => {
     if (!text.trim() || loading) return;
@@ -156,13 +161,42 @@ function RecoveryChatWidget({ contextRef }) {
     try {
       const res = await axios.post('/api/conversation/message', {
         sessionId, message: text,
-        context: { amount: contextRef.current.amount, category: contextRef.current.category, status: 'failed' }
+        context: {
+          amount: context.amount, category: context.category,
+          status: hasActiveFailure ? 'failed' : 'unknown',
+          errorCode: context.errorCode, errorReason: context.errorReason,
+        }
       });
       setMsgs(p => [...p, { role: 'agent', content: res.data.agentResponse }]);
     } catch {
       setMsgs(p => [...p, { role: 'agent', content: 'Sorry, something went wrong. Please try again.' }]);
     }
     setLoading(false);
+  };
+
+  // A real retry, not just advice — reuses the same real Razorpay flow as everywhere else.
+  const handlePayNow = async () => {
+    setPaying(true);
+    try {
+      const { data: order } = await axios.post('/api/checkout/create-retry-order', { transactionId: context.transactionId });
+      openRazorpay({
+        keyId: order.keyId, orderId: order.orderId, amount: order.amount,
+        customer: order.customer, productName: 'Retry Payment',
+        onSuccess: async (resp) => {
+          await axios.post('/api/checkout/payment-success', { ...resp, internalId: context.transactionId });
+          setMsgs(p => [...p, { role: 'agent', content: `✅ Payment successful — ₹${order.amount.toLocaleString('en-IN')} went through.` }]);
+          setPaying(false);
+        },
+        onFailed: async (err) => {
+          await axios.post('/api/checkout/payment-failed', { razorpay_order_id: order.orderId, internalId: context.transactionId, razorpayError: err }).catch(() => {});
+          setMsgs(p => [...p, { role: 'agent', content: `That attempt didn't go through either — try a different card or UPI ID.` }]);
+          setPaying(false);
+        },
+        onDismissed: () => setPaying(false),
+      });
+    } catch {
+      setPaying(false);
+    }
   };
 
   return (
@@ -197,7 +231,17 @@ function RecoveryChatWidget({ contextRef }) {
             )}
             <div ref={endRef} />
           </div>
-          <div style={{ padding: '10px 14px 14px', display: 'flex', gap: 8 }}>
+          {hasActiveFailure && (
+            <div style={{ padding: '0 14px 10px' }}>
+              <button onClick={handlePayNow} disabled={paying} style={{
+                width: '100%', padding: '9px', border: 'none', borderRadius: 8, cursor: paying ? 'not-allowed' : 'pointer',
+                background: '#0EA371', color: 'white', fontSize: 12.5, fontWeight: 700,
+              }}>
+                {paying ? '⏳ Opening Razorpay…' : `💳 Retry Payment — ₹${Number(context.amount).toLocaleString('en-IN')}`}
+              </button>
+            </div>
+          )}
+          <div style={{ padding: '0 14px 14px', display: 'flex', gap: 8 }}>
             <input value={input} onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && send(input)}
               placeholder="Type a message..." className="input" style={{ flex: 1 }} />
@@ -711,7 +755,7 @@ export default function CustomerStore() {
   const [notifOpen, setNotifOpen]     = useState(false);
   const [expandedNotifId, setExpandedNotifId] = useState(null);
 
-  const chatContextRef = useRef({ amount: 0, category: 'checkout' });
+  const [chatContext, setChatContext] = useState({ amount: 0, category: 'checkout' });
 
   useEffect(() => {
     if (!auth) { navigate('/login'); }
@@ -759,7 +803,7 @@ export default function CustomerStore() {
         customerId, productId: cart[0].id, amount: cartTotal, category,
       });
       setCurrentOrder(order);
-      chatContextRef.current = { amount: cartTotal, category };
+      setChatContext({ amount: cartTotal, category, transactionId: order.internalId });
 
       openRazorpay({
         keyId: order.keyId, orderId: order.orderId, amount: order.amount,
@@ -767,11 +811,18 @@ export default function CustomerStore() {
         onSuccess: async (resp) => {
           await axios.post('/api/checkout/payment-success', { ...resp, internalId: order.internalId });
           setResult({ type: 'success', paymentId: resp.razorpay_payment_id });
+          setChatContext({ amount: 0, category: 'checkout' });
           finishOrder('success');
         },
         onFailed: async (err) => {
           const { data } = await axios.post('/api/checkout/payment-failed', {
             razorpay_order_id: order.orderId, internalId: order.internalId, razorpayError: err,
+          });
+          // Real, specific failure detail the chatbot can actually reason about —
+          // not just "amount + category", which is all it had before.
+          setChatContext({
+            amount: cartTotal, category, transactionId: order.internalId,
+            errorCode: data.errorCode, errorReason: data.errorReason,
           });
           setResult({ type: 'failed', errorCode: data.errorCode, errorReason: data.errorReason });
           finishOrder('failed', { errorCode: data.errorCode });
@@ -779,6 +830,10 @@ export default function CustomerStore() {
         onDismissed: async () => {
           await axios.post('/api/checkout/payment-abandoned', {
             razorpay_order_id: order.orderId, internalId: order.internalId,
+          });
+          setChatContext({
+            amount: cartTotal, category, transactionId: order.internalId,
+            errorCode: 'ABANDONED', errorReason: 'Customer closed the payment window without completing it',
           });
           setResult({ type: 'abandoned' });
           finishOrder('abandoned');
@@ -1047,7 +1102,7 @@ export default function CustomerStore() {
       <VoiceRecoveryWidget customerId={customerId} customer={customer} />
 
       {/* Floating AI assistant — free-form chat, ask anything any time */}
-      <RecoveryChatWidget contextRef={chatContextRef} />
+      <RecoveryChatWidget context={chatContext} />
     </div>
   );
 }

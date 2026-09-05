@@ -51,7 +51,7 @@ const icons = {
 const PAGE_TITLES = {
   '/':               { title: 'Recovery Dashboard',   sub: 'AI-powered payment recovery · Real-time pipeline' },
   '/recovery-live':  { title: 'Recovery Live',        sub: 'Admin + Customer dual-panel · LLM reasoning · AI auto-recovery' },
-  '/conversation':   { title: 'LLM Reasoning Preview', sub: 'Sandbox — try the real Groq model, disconnected from live transactions' },
+  '/conversation':   { title: 'LLM Reasoning Preview', sub: 'Pick a real failed payment and watch the LLM reason about it live' },
   '/invoices':       { title: 'B2B Invoice Recovery', sub: 'Staged reminders · Promise-to-pay tracking · AI intent' },
   '/reconciliation': { title: 'Reconciliation',       sub: 'Cross-check against Razorpay\'s real records · Auto-recover untracked payments' },
 };

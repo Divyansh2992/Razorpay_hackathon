@@ -286,12 +286,38 @@ Be concise (under 60 words), empathetic, and solution-focused. Write in natural 
   return { message: raw.trim(), method: 'llm', isMock: false };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 🧠 Admin reasoning console — the admin is asking ABOUT a real failure, not
+// replying as the customer, so this gets its own prompt: an internal analyst
+// voice that explains the diagnosis and recommends an action, but never pretends
+// to execute one (that only happens via the real recovery-pipeline trigger).
+// ─────────────────────────────────────────────────────────────────────────────
+async function generateAdminReasoning({ systemContext, conversationHistory, lastMessage }) {
+  const systemPrompt = `You are an internal reasoning assistant helping a Razorpay admin analyze a real payment failure and decide on a recovery action.
+${systemContext}
+You are talking TO THE ADMIN, not the customer — never address "you" as the customer.
+You cannot send messages, resend links, or take any action yourself — you only explain and recommend. If asked to "send" or "do" something, tell the admin to use the "Send Real Recovery Action" button instead.
+Be concise (under 60 words), specific to the real failure reason given, and recommend one concrete next step (e.g. silent retry, WhatsApp nudge, in-app verification, escalation, or reconciliation) with brief reasoning.`;
+
+  const historyText = conversationHistory.slice(-6).map(m => `${m.role === 'agent' ? 'Assistant' : 'Admin'}: ${m.content}`).join('\n');
+  const userMessage = `${historyText}\nAdmin: "${lastMessage}"`;
+
+  const raw = await callGroq(systemPrompt, userMessage);
+
+  if (!raw) {
+    return { message: `Based on the failure reason on record, I'd recommend a WhatsApp nudge with the payment link — it's the lowest-friction option for this case.`, method: 'llm', isMock: true };
+  }
+
+  return { message: raw.trim(), method: 'llm', isMock: false };
+}
+
 module.exports = {
   diagnoseAmbiguous,
   classifyReplyIntent,
   classifyOtpIssue,
   generateNudgeMessage,
   generateMandateNotice,
+  generateAdminReasoning,
   generateVoiceTurn,
   generateChatResponse
 };

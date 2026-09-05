@@ -47,7 +47,12 @@ const ERROR_CODE_MAP = {
   NETWORK_ERROR: 'infra_glitch',
   PROCESSOR_DOWN: 'infra_glitch',
   BANK_UNAVAILABLE: 'infra_glitch',
-  CARD_005: 'infra_glitch'
+  CARD_005: 'infra_glitch',
+
+  // Cart abandonment — no bank/card signal at all, so there's nothing to silently
+  // retry; the customer simply needs a nudge back. Always routed deterministically,
+  // never left to the LLM to (mis)judge as a silent-retry case.
+  ABANDONED: 'ambiguous'
 };
 
 // Failure types explicitly mapped to "ambiguous" to force LLM path (15-20% of cases)
